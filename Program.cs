@@ -10,6 +10,100 @@ if (args.Contains("--list-nics"))
     return;
 }
 
+// --- Video mode ---
+var videoIdx = Array.IndexOf(args, "--video");
+if (videoIdx >= 0)
+{
+    if (videoIdx + 1 >= args.Length)
+    {
+        Console.WriteLine("Usage: --video <file>");
+        return;
+    }
+    string videoPath = args[videoIdx + 1];
+    if (!File.Exists(videoPath))
+    {
+        Console.WriteLine($"File not found: {videoPath}");
+        return;
+    }
+
+    var vidConfig = new ConfigurationBuilder()
+        .SetBasePath(AppContext.BaseDirectory)
+        .AddJsonFile("appsettings.json", optional: false)
+        .Build();
+    var vidSettings = vidConfig.GetSection("Banner").Get<BannerSettings>()!;
+    int w = vidSettings.ScreenWidth, h = vidSettings.ScreenHeight;
+
+    using var vidSender = new ColorlightSender(vidSettings.NetworkInterface);
+    vidSender.SetBrightness(vidSettings.Brightness);
+
+    var cts3 = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts3.Cancel(); };
+
+    // Use ffmpeg to decode video → raw BGR24 frames at panel resolution
+    // BGR order matches what the Colorlight 5A-75B expects
+    var fps = vidSettings.TargetFps;
+    var psi = new ProcessStartInfo
+    {
+        FileName = "ffmpeg",
+        Arguments = $"-re -stream_loop -1 -i \"{videoPath}\" " +
+                    $"-vf \"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2\" " +
+                    $"-r {fps} -pix_fmt bgr24 -f rawvideo -",
+        RedirectStandardOutput = true,
+        RedirectStandardError = false,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+
+    using var ffmpeg = Process.Start(psi)
+        ?? throw new InvalidOperationException("Failed to start ffmpeg.");
+
+    Console.WriteLine($"Video mode: {videoPath}");
+    Console.WriteLine($"  Screen: {w}x{h}, FPS: {fps}, NIC: {vidSettings.NetworkInterface}");
+    Console.WriteLine("Press Ctrl+C to stop.");
+    Console.WriteLine();
+
+    var stream = ffmpeg.StandardOutput.BaseStream;
+    int frameSize = w * h * 3;
+    var frameBuf = new byte[frameSize];
+    int frameCount3 = 0;
+    var sw3 = Stopwatch.StartNew();
+    double lastFps3 = 0;
+
+    while (!cts3.Token.IsCancellationRequested)
+    {
+        // Read one complete frame from ffmpeg stdout
+        int totalRead = 0;
+        while (totalRead < frameSize)
+        {
+            int read = stream.Read(frameBuf, totalRead, frameSize - totalRead);
+            if (read == 0)
+            {
+                // EOF — ffmpeg exited (shouldn't happen with -stream_loop -1)
+                Console.WriteLine("\nEnd of video stream.");
+                goto videoEnd;
+            }
+            totalRead += read;
+        }
+
+        vidSender.SendFrame(frameBuf, w, h, sync: true);
+
+        frameCount3++;
+        double now3 = sw3.Elapsed.TotalSeconds;
+        if (now3 - lastFps3 >= 2.0)
+        {
+            Console.Write($"\r  Video: {frameCount3 / (now3 - lastFps3):F1} fps  ");
+            frameCount3 = 0;
+            lastFps3 = now3;
+        }
+    }
+
+    videoEnd:
+    ffmpeg.Kill();
+    ffmpeg.WaitForExit();
+    Console.WriteLine("Stopped.");
+    return;
+}
+
 // --- Test pattern mode ---
 if (args.Contains("--test"))
 {
