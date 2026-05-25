@@ -223,7 +223,6 @@ int scrollPosition = 0;
 int totalScroll = renderer.TotalScrollWidth;
 double scrollInterval = 1.0 / settings.TargetFps;
 var stopwatch = Stopwatch.StartNew();
-double lastScrollTime = 0;
 int frameCount = 0;
 double lastFpsTime = 0;
 
@@ -237,25 +236,17 @@ while (!cts.Token.IsCancellationRequested)
 {
     double now = stopwatch.Elapsed.TotalSeconds;
 
-    // Advance scroll at the target rate
-    if (now - lastScrollTime >= scrollInterval)
-    {
-        scrollPosition += settings.ScrollSpeedPixelsPerFrame;
-        if (scrollPosition >= totalScroll)
-            scrollPosition -= totalScroll;
-        pixels = renderer.GetFramePixels(scrollPosition);
-        lastScrollTime = now;
+    // Advance the scroll position one step
+    scrollPosition += settings.ScrollSpeedPixelsPerFrame;
+    if (scrollPosition >= totalScroll)
+        scrollPosition -= totalScroll;
+    pixels = renderer.GetFramePixels(scrollPosition);
 
-        // Send new data twice with sync so BOTH buffers get updated
-        sender.SendFrame(pixels, settings.ScreenWidth, settings.ScreenHeight, sync: true);
-        sender.SendFrame(pixels, settings.ScreenWidth, settings.ScreenHeight, sync: true);
-    }
-    else
-    {
-        // Keep refreshing same data without sync (no buffer swap = no tearing)
-        sender.SendFrame(pixels, settings.ScreenWidth, settings.ScreenHeight, sync: false);
-        sender.SendFrame(pixels, settings.ScreenWidth, settings.ScreenHeight, sync: false);
-    }
+    // Send the new frame once with sync. The receiver card retains and
+    // refreshes this image on its own, so there's no need to resend it
+    // between frames. Sending twice keeps both buffers identical.
+    sender.SendFrame(pixels, settings.ScreenWidth, settings.ScreenHeight, sync: true);
+    sender.SendFrame(pixels, settings.ScreenWidth, settings.ScreenHeight, sync: true);
 
     // FPS counter
     frameCount++;
@@ -266,6 +257,12 @@ while (!cts.Token.IsCancellationRequested)
         frameCount = 0;
         lastFpsTime = now;
     }
+
+    // Pace to TargetFps — sleep for the remainder of this frame's budget
+    double frameDuration = stopwatch.Elapsed.TotalSeconds - now;
+    int sleepMs = (int)((scrollInterval - frameDuration) * 1000);
+    if (sleepMs > 0)
+        Thread.Sleep(sleepMs);
 }
 
 Console.WriteLine();
